@@ -1,0 +1,89 @@
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Doc Generator')
+    .addItem('Generate Docs', 'showApprovalPopup')
+    .addToUi();
+}
+
+function showApprovalPopup() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const rows = sheet.getDataRange().getValues();
+  const headers = rows[0].map(h => h.toLowerCase()); // Case-insensitive headers
+  const docHeaderIndex = headers.indexOf('doc') > -1 ? headers.indexOf('doc') : headers.indexOf('document');
+  const totalDocs = rows.filter((_, i) => i > 0 && !rows[i][docHeaderIndex]).length; // Count of rows without docs
+
+  const ui = SpreadsheetApp.getUi();
+  const result = ui.alert(
+    'Generate Documents',
+    `You are about to create ${totalDocs} documents. Do you want to proceed?`,
+    ui.ButtonSet.YES_NO
+  );
+
+  if (result === ui.Button.YES) {
+    showSharingOptionsDropdown(); // Show dropdown for sharing options
+  }
+}
+
+function showSharingOptionsDropdown() {
+  const html = HtmlService.createHtmlOutputFromFile('SharingDropdown')
+    .setWidth(300)
+    .setHeight(150);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Select Sharing Option');
+}
+
+function processSharingOption(option) {
+  const folder = DriveApp.getFolderById(
+    DriveApp.getRootFolder().getId() // Default to root folder, modify to prompt for selection if needed
+  );
+
+  if (!folder) {
+    SpreadsheetApp.getUi().alert('Folder selection failed. Exiting.');
+    return;
+  }
+
+  generateDocsFromSheet(folder, option.toLowerCase()); // Pass selected sharing option
+}
+
+function generateDocsFromSheet(folder, shareOption) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const rows = sheet.getDataRange().getValues();
+  const headers = rows[0].map(h => h.toLowerCase()); // Case-insensitive matching for headers
+  const templateId = '1hCspsgCPz39Il8zXfTiRUGg6v1l3fG4TnPo8FTr10yU'; // Replace with your Google Doc template ID
+  const docHeaderIndex = headers.indexOf('doc') > -1 ? headers.indexOf('doc') : headers.indexOf('document');
+  const topicIndex = headers.indexOf('topic'); // Index for the 'Topic' column
+
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][docHeaderIndex]) continue; // Skip if a document is already created
+
+    // Use 'Topic' value as the filename
+    const topicValue = topicIndex > -1 ? rows[i][topicIndex] : 'Untitled Document';
+    const newDoc = DriveApp.getFileById(templateId).makeCopy(topicValue, folder);
+    const doc = DocumentApp.openById(newDoc.getId());
+    let body = doc.getBody();
+
+    // Replace matching headers with values directly in the document
+    headers.forEach((header, index) => {
+      if (header !== 'doc' && header !== 'document') {
+        const value = rows[i][index];
+        body.replaceText(`{${header}}`, value ? value : ''); // Replace the template placeholders with the corresponding values
+      }
+    });
+
+    doc.saveAndClose();
+
+    // Share the document based on the selected option
+    if (shareOption === 'anyone with domain') {
+      newDoc.setSharing(DriveApp.Access.ANYONE_WITH_DOMAIN, DriveApp.Permission.EDIT);
+    } else if (shareOption === 'anyone with link') {
+      newDoc.setSharing(DriveApp.Access.ANYONE, DriveApp.Permission.VIEW);
+    }
+
+    // Save the link in the "Doc" column
+    sheet.getRange(i + 1, docHeaderIndex + 1).setValue(newDoc.getUrl());
+
+    // Highlight the first column
+    sheet.getRange(i + 1, 1).setBackground('#DFF2BF'); // Success highlight (light green)
+  }
+
+  SpreadsheetApp.getUi().alert('Documents created successfully!');
+}
