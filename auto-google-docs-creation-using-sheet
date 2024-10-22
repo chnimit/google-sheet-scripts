@@ -48,7 +48,7 @@ function generateDocsFromSheet(folder, shareOption) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   const rows = sheet.getDataRange().getValues();
   const headers = rows[0].map(h => h.toLowerCase()); // Case-insensitive matching for headers
-  const templateId = '1hCspsgCPz39Il8zXfTiRUGg6v1l3fG4TnPo8FTr10yU'; // Replace with your Google Doc template ID
+  const templateId = 'template id here'; // Replace with your Google Doc template ID
   const docHeaderIndex = headers.indexOf('doc') > -1 ? headers.indexOf('doc') : headers.indexOf('document');
   const topicIndex = headers.indexOf('topic'); // Index for the 'Topic' column
 
