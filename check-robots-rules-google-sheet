@@ -1,0 +1,50 @@
+function checkRobotsRules() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var checkerSheet = ss.getSheetByName("Robots Checker");
+  var rulesSheet = ss.getSheetByName("Robots Rules");
+  
+  if (!checkerSheet || !rulesSheet) {
+    Logger.log("One or both sheets are missing.");
+    return;
+  }
+  
+  var urls = checkerSheet.getRange("A2:A" + checkerSheet.getLastRow()).getValues();
+  var rules = rulesSheet.getRange("A2:B" + rulesSheet.getLastRow()).getValues();
+  
+  var results = [];
+  var colors = [];
+  
+  urls.forEach(function(urlRow) {
+    var url = urlRow[0];
+    if (!url) {
+      results.push(["", ""]);
+      colors.push(["white", "white"]);
+      return;
+    }
+    
+    var blocked = false;
+    var matchedRule = "";
+    
+    rules.forEach(function(ruleRow) {
+      var ruleType = ruleRow[0].trim();
+      var rulePattern = ruleRow[1].trim();
+      
+      if (ruleType.toLowerCase() === "disallow:") {
+        var regexPattern = rulePattern.replace(/\*/g, '.*') + '$';
+        var regex = new RegExp(regexPattern);
+        
+        if (regex.test(url)) {
+          blocked = true;
+          matchedRule = rulePattern;
+        }
+      }
+    });
+    
+    results.push([blocked ? "Blocked" : "Allowed", matchedRule]);
+    colors.push([blocked ? "#FFCCCC" : "#CCFFCC", "white"]); // Red for Blocked, Green for Allowed
+  });
+  
+  var resultRange = checkerSheet.getRange(2, 2, results.length, 2);
+  resultRange.setValues(results);
+  resultRange.setBackgrounds(colors);
+}
