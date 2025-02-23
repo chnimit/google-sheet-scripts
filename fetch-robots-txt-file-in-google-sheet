@@ -1,0 +1,42 @@
+function fetchRobotsTxt() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var guideSheet = ss.getSheetByName("Guide");
+  var rulesSheet = ss.getSheetByName("Robots.txt Rules");
+  
+  
+  if (!guideSheet || !rulesSheet) {
+    Logger.log("One or both sheets are missing.");
+    return;
+  }
+  
+  // Get the domain name from cell C4 in the "Guide" sheet
+  var domain = guideSheet.getRange("C4").getValue();
+  Logger.log("Domain: " + domain);
+  
+  // Construct the robots.txt URL
+  var robotsUrl = "https://" + domain + "/robots.txt";
+  Logger.log("Robots URL: " + robotsUrl);
+  
+  // Fetch the robots.txt content
+  try {
+    var response = UrlFetchApp.fetch(robotsUrl);
+    var robotsContent = response.getContentText();
+    Logger.log("Robots Content: " + robotsContent);
+    
+    // Split the robots.txt content into individual rules
+    var rules = robotsContent.split(/\r?\n/).map(rule => rule.trim()).filter(rule => rule !== "");
+    
+    // Clear existing content in the range A2:A in the "Robots Rules" sheet
+    rulesSheet.getRange("A2:A" + (rulesSheet.getLastRow() + 1)).clearContent();
+    
+    // Write each rule to a separate cell in the range A2:A
+    rulesSheet.getRange(2, 1, rules.length, 1).setValues(rules.map(rule => [rule]));
+    
+    // Show success message in cell E4 of the "Guide" sheet
+    guideSheet.getRange("E4").setValue("Successful").setBackground("#CCFFCC"); // Green
+  } catch (error) {
+    // If there is an issue fetching the robots.txt, show an error message in cell E4 of the "Guide" sheet
+    guideSheet.getRange("E4").setValue("Error: Copy the Robots Rules Manually").setBackground("#FFCCCC"); // Red
+    Logger.log("Error fetching robots.txt: " + error.message);
+  }
+}
