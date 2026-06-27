@@ -1,0 +1,565 @@
+const API_KEY = 'api key here'; // <-- Put your Gemini API key here
+const TEMPLATE_DOC_ID = 'template doc with dynamic fileds'; // <-- Your Google Docs template ID here
+// 1. Access the "Setup" sheet
+const ss = SpreadsheetApp.getActiveSpreadsheet();
+const setupSheet = ss.getSheetByName("Setup");
+
+// 2. Get the full URL from cell C2
+const docUrl = setupSheet.getRange("C2").getValue();
+
+// 3. Extract the ID from the URL using a Regular Expression
+// This looks for the string between "/d/" and the next "/"
+const match = docUrl.match(/\/d\/(.*?)(\/|$)/);
+const PROMPT_DOC_ID = match ? match[1] : null;
+
+// Error handling to ensure an ID was found
+if (!PROMPT_DOC_ID) {
+  throw new Error("Could not find a valid Google Doc ID in cell C2 of the Setup sheet.");
+}
+
+// Now you can use PROMPT_DOC_ID as before
+console.log("Using Doc ID: " + PROMPT_DOC_ID);
+
+
+
+// === CONFIRMATION DIALOG ===
+
+function showApprovalPopup() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Brief Maker");
+
+  // Error handling if the sheet doesn't exist
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('Error: Sheet "Brief Maker" not found. Please check the sheet name.');
+    return;
+  }
+
+  const rows = sheet.getDataRange().getValues();
+  const originalHeaders = rows[0];
+  const lowerCaseHeaders = originalHeaders.map(h => String(h).toLowerCase());
+  
+  // Find indices
+  const topicIndex = lowerCaseHeaders.indexOf('topic');
+  const docColIndex = lowerCaseHeaders.indexOf('doc') > -1 ? lowerCaseHeaders.indexOf('doc') : lowerCaseHeaders.indexOf('document');
+
+  if (topicIndex === -1) {
+    SpreadsheetApp.getUi().alert('Error: "Topic" column not found.');
+    return;
+  }
+
+  // Filter rows: Must not be header, Must have text in Topic, Must not have a Doc link already
+  const docsToGenerateCount = rows.filter((row, i) => {
+    const isHeader = i === 0;
+    const hasTopicText = row[topicIndex] && String(row[topicIndex]).trim() !== '';
+    const isDocNotGenerated = docColIndex === -1 || !row[docColIndex]; // True if doc column missing or cell is empty
+    return !isHeader && hasTopicText && isDocNotGenerated;
+  }).length;
+
+  const ui = SpreadsheetApp.getUi();
+
+  if (docsToGenerateCount === 0) {
+    ui.alert('No topics to Proceed');
+    return;
+  }
+
+  const result = ui.alert(
+    'Generate Documents',
+    `You are about to create ${docsToGenerateCount} documents from the "Brief Maker" sheet. Proceed?`,
+    ui.ButtonSet.YES_NO
+  );
+
+  if (result === ui.Button.YES) {
+    generateOutlineWithGeminiAPI(DriveApp.getRootFolder());
+  }
+}
+
+// === HELPER FUNCTION TO GET ALL BODY SECTIONS (MAIN, HEADER, FOOTER) ===
+function getAllBodySections(doc) {
+  const sections = [];
+  if (doc) {
+    sections.push(doc.getBody()); // Main body
+
+    const header = doc.getHeader();
+    if (header) {
+      sections.push(header.getBody()); // Header's body
+    }
+
+    const footer = doc.getFooter();
+    if (footer) {
+      sections.push(footer.getBody()); // Footer's body
+    }
+    // You could extend this to include footnote sections if needed:
+    // const footnoteSection = doc.getFootnoteSection();
+    // if (footnoteSection) {
+    //   sections.push(footnoteSection.getBody());
+    // }
+  }
+  return sections.filter(section => section != null); // Filter out null sections
+}
+
+
+// === MAIN GENERATION FUNCTION (Updated Logic) ===
+// === MAIN GENERATION FUNCTION (Fixes Keyword Injection) ===
+// === MAIN GENERATION FUNCTION (Fixed: Robust Keyword Pasting) ===
+// === MAIN GENERATION FUNCTION (With Toasts & Vertical Bullet Keywords) ===
+// === MAIN GENERATION FUNCTION (Fixed: Strict Keyword Separation) ===
+// === MAIN GENERATION FUNCTION (Fixed: History Mapping & Access Sharing) ===
+function generateOutlineWithGeminiAPI(folder) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getActiveSheet();
+  const rows = sheet.getDataRange().getValues();
+  const originalHeaders = rows[0]; 
+  const lowerCaseHeaders = originalHeaders.map(h => String(h).toLowerCase());
+
+  // Locate Source Columns (From Brief Maker)
+  const docColIndex = lowerCaseHeaders.findIndex(h => h === 'doc' || h === 'document');
+  const keywordIndex = lowerCaseHeaders.indexOf('keyword'); 
+  const topicIndex = lowerCaseHeaders.indexOf('topic');
+  const categoryIndex = lowerCaseHeaders.indexOf('category');
+  const urlIndex = lowerCaseHeaders.indexOf('url');
+  const rankingIndex = lowerCaseHeaders.indexOf('ranking');
+  const volumeIndex = lowerCaseHeaders.indexOf('volume');
+  
+  // Specific Keyword Columns
+  const secKeywordsIndex = lowerCaseHeaders.indexOf('secondary keywords');
+  const linkKeywordsIndex = lowerCaseHeaders.indexOf('linking keywords');
+
+  if (docColIndex === -1 || keywordIndex === -1) {
+    SpreadsheetApp.getUi().alert('Error: Missing "Keyword" or "Doc" column in the source sheet.');
+    return;
+  }
+
+  // Setup History Sheet with Fixed Headers
+  let historySheet = spreadsheet.getSheetByName("Brief History");
+  if (!historySheet) {
+    historySheet = spreadsheet.insertSheet("Brief History");
+    historySheet.appendRow(['topic', 'category', 'url', 'primary keyword', 'ranking', 'volume', 'secondary keywords', 'linking keywords', 'document', 'Date']);
+    historySheet.setFrozenRows(1);
+  }
+
+  let geminiLogSheet = spreadsheet.getSheetByName("Gemini Logs") || spreadsheet.insertSheet("Gemini Logs");
+  const promptDoc = DocumentApp.openById(PROMPT_DOC_ID);
+  const promptText = promptDoc.getBody().getText();
+
+  // Loop through rows
+  for (let i = 1; i < rows.length; i++) {
+    // Skip if Doc already exists or Keyword is empty
+    if (rows[i][docColIndex] || !rows[i][keywordIndex]) continue;
+
+    const keyword = rows[i][keywordIndex];
+    const currentRowData = [...rows[i]]; // Copy of source data
+    
+    spreadsheet.toast(`Generating Brief for: "${keyword}"`, "Step 1/3: API Call", -1);
+
+    // 1. Generate Content
+    const fullPrompt = promptText.replace(/{keyword}/g, String(keyword)); 
+    const result = generateOutlineWithGemini(fullPrompt, geminiLogSheet, String(keyword));
+
+    if (result.format === 'error') {
+       sheet.getRange(i + 1, 1, 1, sheet.getLastColumn()).setBackground('#FFCCCC'); 
+       spreadsheet.toast(`Failed: ${keyword}`, "Error", 5);
+       continue;
+    }
+
+    // 2. Extract Data using Regex
+    let finalDocContent = result.text;
+    let extractedSecondary = "Not generated";
+    let extractedLinking = "Not generated";
+    let rawSecondaryForSheet = ""; 
+    let rawLinkingForSheet = "";   
+    
+    const dataBlockRegex = /!!!DATA_START!!!([\s\S]*?)!!!DATA_END!!!/;
+    const match = finalDocContent.match(dataBlockRegex);
+
+    if (match) {
+      const dataBlock = match[1]; 
+      
+      const secMatch = dataBlock.match(/Secondary:\s*([\s\S]*?)(?=Linking:|$)/i);
+      if (secMatch) {
+        rawSecondaryForSheet = secMatch[1].trim().replace(/,\s*$/, ""); 
+        extractedSecondary = rawSecondaryForSheet.split(',').map(k => `• ${k.trim()}`).join('\n');
+      }
+
+      const linkMatch = dataBlock.match(/Linking:\s*([\s\S]*?)$/i);
+      if (linkMatch) {
+        rawLinkingForSheet = linkMatch[1].trim();
+        extractedLinking = rawLinkingForSheet.split(',').map(k => `• ${k.trim()}`).join('\n');
+      }
+
+      finalDocContent = finalDocContent.replace(match[0], "").trim();
+    }
+
+    // 3. Update Sheet Columns (Source Sheet)
+    if (secKeywordsIndex > -1 && rawSecondaryForSheet !== "") {
+      sheet.getRange(i + 1, secKeywordsIndex + 1).setValue(rawSecondaryForSheet);
+      // Update our local data variable so History gets the fresh data too
+      currentRowData[secKeywordsIndex] = rawSecondaryForSheet; 
+    }
+    if (linkKeywordsIndex > -1 && rawLinkingForSheet !== "") {
+       sheet.getRange(i + 1, linkKeywordsIndex + 1).setValue(rawLinkingForSheet);
+       currentRowData[linkKeywordsIndex] = rawLinkingForSheet;
+    }
+
+    // 4. Create Document
+    spreadsheet.toast(`Creating Doc: "${keyword}"`, "Step 2/3: Formatting", -1);
+    const fileName = rows[i][topicIndex] || keyword || 'Untitled';
+    const newDocFile = DriveApp.getFileById(TEMPLATE_DOC_ID).makeCopy(fileName, folder);
+    const newDoc = DocumentApp.openById(newDocFile.getId());
+    const body = newDoc.getBody();
+
+    // 5. Placeholder Replacement
+    const allSections = getAllBodySections(newDoc);
+    
+    allSections.forEach(section => {
+       originalHeaders.forEach((header, idx) => {
+         const val = currentRowData[idx] || "";
+         section.replaceText(`{${header}}`, val);
+       });
+
+       section.replaceText(`{keyword}`, keyword);
+       section.replaceText(`{primary_keyword}`, keyword);
+
+       section.replaceText(`{secondary_keywords}`, extractedSecondary);
+       section.replaceText(`{secondary_keyword}`, extractedSecondary);
+       section.replaceText(`{Secondary Keywords}`, extractedSecondary);
+
+       section.replaceText(`{linking_keywords}`, extractedLinking);
+       section.replaceText(`{linking_keyword}`, extractedLinking);
+       section.replaceText(`{Linking Keywords}`, extractedLinking);
+    });
+
+    // 6. Insert Markdown
+    const outlinePlaceholder = body.findText('{outline}');
+    if (outlinePlaceholder) {
+      const element = outlinePlaceholder.getElement();
+      const parent = element.getParent();
+      if (parent.getNumChildren() === 1) parent.removeFromParent(); 
+      else element.removeFromParent();
+
+      const dataObject = { text: finalDocContent, format: "markdown" };
+      parseAndInsertFormattedText(body, dataObject, body.getNumChildren());
+    } else {
+      const dataObject = { text: finalDocContent, format: "markdown" };
+      parseAndInsertFormattedText(body, dataObject, body.getNumChildren());
+    }
+
+    newDoc.saveAndClose();
+    const docUrl = newDocFile.getUrl();
+
+    // --- FIX 1: RESTORE ACCESS SHARING ---
+    try {
+      // Grant View Access to anyone in the domain (Workspace)
+      newDocFile.setSharing(DriveApp.Access.DOMAIN, DriveApp.Permission.VIEW);
+    } catch (e) {
+      Logger.log("Domain sharing failed (user might be on personal Gmail): " + e.message);
+      try {
+        // Fallback for personal accounts
+        newDocFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      } catch (e2) {
+        Logger.log("Fallback sharing failed: " + e2.message);
+      }
+    }
+    // -------------------------------------
+
+    // 7. Update Source Sheet
+    sheet.getRange(i + 1, docColIndex + 1).setValue(docUrl);
+    sheet.getRange(i + 1, 1, 1, sheet.getLastColumn()).setBackground('#DFF2BF');
+    
+    // --- FIX 2: STRICT HISTORY MAPPING ---
+    // Prepare values. If index is -1 (not found in source), use empty string.
+    const h_topic = topicIndex > -1 ? currentRowData[topicIndex] : "";
+    const h_category = categoryIndex > -1 ? currentRowData[categoryIndex] : "";
+    const h_url = urlIndex > -1 ? currentRowData[urlIndex] : "";
+    const h_keyword = keyword; // We know this exists
+    const h_ranking = rankingIndex > -1 ? currentRowData[rankingIndex] : "";
+    const h_volume = volumeIndex > -1 ? currentRowData[volumeIndex] : "";
+    
+    // For keywords, use the variables we extracted/generated
+    const h_secKeywords = rawSecondaryForSheet || (secKeywordsIndex > -1 ? currentRowData[secKeywordsIndex] : "");
+    const h_linkKeywords = rawLinkingForSheet || (linkKeywordsIndex > -1 ? currentRowData[linkKeywordsIndex] : "");
+
+    // Construct the row in the EXACT order of History Headers
+    // Order: topic, category, url, primary keyword, ranking, volume, secondary keywords, linking keywords, document, Date
+    const historyRow = [
+      h_topic, 
+      h_category, 
+      h_url, 
+      h_keyword, 
+      h_ranking, 
+      h_volume, 
+      h_secKeywords, 
+      h_linkKeywords, 
+      docUrl, 
+      new Date()
+    ];
+
+    historySheet.appendRow(historyRow);
+    // -------------------------------------
+
+    SpreadsheetApp.flush();
+    spreadsheet.toast(`Cooling down... (2s)`, "Step 3/3: Rate Limit", 2);
+    Logger.log(`Sleeping 10s...`);
+    Utilities.sleep(2000);
+  }
+  
+  SpreadsheetApp.getUi().alert('Batch Complete!');
+}
+
+// === APPLY BOLD FORMATTING (MARKDOWN) ===
+function applyMarkdownBoldFormattingToTextElement(textElement, markdownContentLine) {
+  let plainText = "";
+  const boldInstructionRanges = []; 
+  let currentIndexInPlainText = 0;
+  const parts = markdownContentLine.split('**');
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (i % 2 === 1 && part.length > 0) { 
+      boldInstructionRanges.push({ start: currentIndexInPlainText, end: currentIndexInPlainText + part.length - 1 });
+    }
+    plainText += part; 
+    currentIndexInPlainText += part.length;
+  }
+  textElement.setText(plainText); 
+  if (plainText.length > 0) {
+    textElement.setBold(0, plainText.length - 1, false);
+    boldInstructionRanges.forEach(range => {
+      if (range.start <= range.end) textElement.setBold(range.start, range.end, true);
+    });
+  }
+}
+
+// === APPLY BOLD FORMATTING (HTML) ===
+function applyHtmlFormattingToTextElement(textElement, htmlContentLine) {
+    let plainText = "";
+    const boldRanges = [];
+    let isBoldActive = false;
+    let currentPlainTextIndex = 0;
+    const tagRegex = /<\/?(b|strong)>/gi;
+    let lastIndex = 0;
+    let match;
+
+    while ((match = tagRegex.exec(htmlContentLine)) !== null) {
+        const textBeforeTag = htmlContentLine.substring(lastIndex, match.index);
+        if (textBeforeTag) {
+            plainText += textBeforeTag;
+            if (isBoldActive) {
+                boldRanges.push({ start: currentPlainTextIndex, end: currentPlainTextIndex + textBeforeTag.length - 1 });
+            }
+            currentPlainTextIndex += textBeforeTag.length;
+        }
+        const tagName = match[0].toLowerCase();
+        if (tagName === "<b>" || tagName === "<strong>") isBoldActive = true;
+        else if (tagName === "</b>" || tagName === "</strong>") isBoldActive = false;
+        lastIndex = tagRegex.lastIndex;
+    }
+    const textAfterLastTag = htmlContentLine.substring(lastIndex);
+    if (textAfterLastTag) {
+        plainText += textAfterLastTag;
+        if (isBoldActive) {
+            boldRanges.push({ start: currentPlainTextIndex, end: currentPlainTextIndex + textAfterLastTag.length - 1 });
+        }
+    }
+    textElement.setText(plainText);
+    if (plainText.length > 0) {
+        textElement.setBold(0, plainText.length - 1, false); 
+        boldRanges.forEach(range => {
+            if (range.start <= range.end && range.end < plainText.length) {
+                textElement.setBold(range.start, range.end, true);
+            }
+        });
+    }
+}
+
+// === PARSE AND INSERT FORMATTED TEXT (Fixed: Heading detection + strips literal H2/H3 tags) ===
+function parseAndInsertFormattedText(targetElement, dataObject, initialInsertionIndex) {
+  const format = dataObject.format;
+  let currentInsertionIndex = initialInsertionIndex;
+
+  if (format === "markdown") {
+    const textContent = dataObject.text || "";
+    const lines = textContent.split('\n');
+
+    lines.forEach((line) => {
+
+      // --- FIX 1: Skip horizontal rules ---
+      if (line.trim() === '---' || line.trim() === '***' || line.trim() === '___') {
+        return;
+      }
+
+      let contentLine = line;
+      let paraElement;
+      let headingType = null;
+
+      // --- FIX 2: Strip literal (H1) (H2) (H3) (H4) tags from anywhere in the line ---
+      // Handles: "Some Heading (H2)", "Some Heading (H3)", "(H2) Some Heading"
+      contentLine = contentLine
+        .replace(/\s*\(H[1-6]\)\s*/gi, ' ')  // strip (H2), (H3) etc
+        .replace(/\s*\[H[1-6]\]\s*/gi, ' ')  // strip [H2], [H3] etc
+        .trim();
+
+      // --- FIX 3: Detect Markdown headings (must check longest prefix first) ---
+      if (line.startsWith('#### ')) {
+        contentLine = line.substring(5).replace(/\s*\(H[1-6]\)\s*/gi, '').trim();
+        headingType = DocumentApp.ParagraphHeading.HEADING4;
+      } else if (line.startsWith('### ')) {
+        contentLine = line.substring(4).replace(/\s*\(H[1-6]\)\s*/gi, '').trim();
+        headingType = DocumentApp.ParagraphHeading.HEADING3;
+      } else if (line.startsWith('## ')) {
+        contentLine = line.substring(3).replace(/\s*\(H[1-6]\)\s*/gi, '').trim();
+        headingType = DocumentApp.ParagraphHeading.HEADING2;
+      } else if (line.startsWith('# ')) {
+        contentLine = line.substring(2).replace(/\s*\(H[1-6]\)\s*/gi, '').trim();
+        headingType = DocumentApp.ParagraphHeading.HEADING1;
+      }
+
+      // --- FIX 4: Fallback — detect plain-text lines ending in (H2) / (H3) etc ---
+      // Catches cases where model forgot ## but wrote "Some Title (H3)"
+      if (!headingType) {
+        const plainHeadingMatch = line.match(/^(.+?)\s*\((H[1-6])\)\s*$/i);
+        if (plainHeadingMatch) {
+          contentLine = plainHeadingMatch[1].trim();
+          const level = plainHeadingMatch[2].toUpperCase();
+          const levelMap = {
+            'H1': DocumentApp.ParagraphHeading.HEADING1,
+            'H2': DocumentApp.ParagraphHeading.HEADING2,
+            'H3': DocumentApp.ParagraphHeading.HEADING3,
+            'H4': DocumentApp.ParagraphHeading.HEADING4,
+          };
+          headingType = levelMap[level] || null;
+        }
+      }
+
+      // --- Render heading ---
+      if (headingType) {
+        const para = targetElement.insertParagraph(currentInsertionIndex++, '');
+        paraElement = para;
+        const textEl = para.editAsText();
+        applyMarkdownBoldFormattingToTextElement(textEl, contentLine);
+        para.setHeading(headingType);
+        if (contentLine.trim().length > 0) {
+          textEl.setBold(true);
+        }
+
+      } else if (line.match(/^(\s*)([\*\-]|\d+\.) /)) {
+        // Bullet / list item
+        const indentMatch = line.match(/^(\s*)/);
+        const indentLevel = indentMatch ? Math.floor(indentMatch[1].length / 2) : 0;
+        contentLine = line.replace(/^\s*([\*\-]|\d+\.)\s/, '');
+
+        // Strip pointer descriptions — keep bold label only
+        const pointerOnlyMatch = contentLine.match(/^(\*\*[^*]+\*\*)\s*:(.*)/);
+        if (pointerOnlyMatch) {
+          contentLine = pointerOnlyMatch[1];
+        }
+
+        const listItem = targetElement.insertListItem(currentInsertionIndex++, '');
+        paraElement = listItem;
+        applyMarkdownBoldFormattingToTextElement(listItem.editAsText(), contentLine);
+        listItem.setGlyphType(DocumentApp.GlyphType.BULLET);
+        if (indentLevel > 0) {
+          listItem.setNestingLevel(Math.min(indentLevel, 5));
+        }
+
+      } else if (line.trim() === '') {
+        // Empty line
+        const para = targetElement.insertParagraph(currentInsertionIndex++, '');
+        paraElement = para;
+
+      } else {
+        // Standard paragraph — strip pointer descriptions here too
+        const plainPointerMatch = contentLine.match(/^(\*\*[^*]+\*\*)\s*:(.*)/);
+        if (plainPointerMatch) {
+          contentLine = plainPointerMatch[1];
+        }
+
+        const para = targetElement.insertParagraph(currentInsertionIndex++, '');
+        paraElement = para;
+        applyMarkdownBoldFormattingToTextElement(para.editAsText(), contentLine);
+      }
+
+      if (paraElement) {
+        paraElement.setSpacingBefore(0).setSpacingAfter(0);
+      }
+    });
+
+  } else {
+    const textContent = dataObject.text || "";
+    const lines = textContent.split('\n');
+    lines.forEach((line) => {
+      const para = targetElement.insertParagraph(currentInsertionIndex++, line);
+      para.setSpacingBefore(0).setSpacingAfter(0);
+    });
+  }
+}
+
+// === GEMINI API CALL FUNCTION (Updated for Flash & Markdown) ===
+function generateOutlineWithGemini(promptText, geminiLogSheet, keywordForRow) {
+  Logger.log("--- Attempting Gemini API Call ---");
+  
+  // UPDATED: Use the stable Flash model
+  const modelName = 'gemini-3.1-flash-lite'; 
+  const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${API_KEY}`;
+  
+  const payload = {
+    contents: [{ parts: [{ text: promptText }] }]
+    // REMOVED: response_mime_type: "application/json" to allow free text/markdown
+  };
+
+  const options = { 
+    method: 'post', 
+    contentType: 'application/json', 
+    payload: JSON.stringify(payload), 
+    muteHttpExceptions: true 
+  };
+
+  // Logging object setup
+  let logData = {
+    timestamp: new Date(), keyword: keywordForRow,
+    promptPartial: promptText.substring(0, 250) + "...",
+    format: "markdown", // Defaulting to markdown now
+    statusCode: null, apiMessage: "Starting API call...",
+    generatedContentPartial: "", 
+    fullResponsePartial: ""
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(requestUrl, options);
+    const responseCode = response.getResponseCode();
+    const responseBodyText = response.getContentText(); 
+    
+    logData.statusCode = responseCode;
+    logData.fullResponsePartial = responseBodyText.substring(0, 500) + "...";
+
+    if (responseCode === 200) {
+      const apiResponse = JSON.parse(responseBodyText); 
+      
+      if (apiResponse.candidates && apiResponse.candidates[0].content) {
+        const rawText = apiResponse.candidates[0].content.parts[0].text;
+        
+        logData.apiMessage = "Success";
+        logData.generatedContentPartial = rawText.substring(0, 250) + "...";
+        
+        // Log to sheet
+        geminiLogSheet.appendRow([
+          logData.timestamp, logData.keyword, logData.promptPartial, 
+          logData.format, logData.statusCode, logData.apiMessage, 
+          logData.generatedContentPartial, logData.fullResponsePartial
+        ]);
+
+        return { text: rawText, format: "markdown" }; 
+      }
+    }
+    
+    // Handle errors
+    logData.apiMessage = `Error: ${responseCode} - ${responseBodyText}`;
+    geminiLogSheet.appendRow([
+          logData.timestamp, logData.keyword, logData.promptPartial, 
+          "error", logData.statusCode, logData.apiMessage, "", ""
+    ]);
+    return { text: `Error: ${responseCode}`, format: "error" };
+
+  } catch (error) {
+    Logger.log('FATAL Error: ' + error.message);
+    return { text: 'FATAL Error: ' + error.message, format: "error" };
+  }
+}
